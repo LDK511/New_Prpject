@@ -1,0 +1,28 @@
+{
+  "name": "@shop/notification-worker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Order notification worker: Redis Stream -> BullMQ -> SMTP mail with exponential backoff and DLQ",
+  "main": "dist/main.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@nestjs/common": "^11.1.6",
+    "@nestjs/core": "^11.1.6",
+    "bullmq": "^5.58.0",
+    "ioredis": "^5.7.0",
+    "nodemailer": "^7.0.9",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "@types/nodemailer": "^7.0.1",
+    "typescript": "^5.9.2"
+  }
+}

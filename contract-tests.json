@@ -1,0 +1,173 @@
+{
+  "description": "계약에서 만든 게이트웨이 통합 테스트. docker compose up 후 scripts/contract-test.mjs 로 순서대로 실행합니다. {{runId}} 는 실행마다 고유한 값, {{var}} 는 앞 단계에서 capture 한 값입니다.",
+  "baseUrl": "http://localhost:3000",
+  "baseUrlEnv": "GATEWAY_URL",
+  "healthChecks": [
+    { "service": "gateway", "urlEnv": "GATEWAY_URL", "default": "http://localhost:3000", "path": "/health", "expectStatus": 200 },
+    { "service": "users", "urlEnv": "USERS_HEALTH_URL", "default": "http://localhost:3001", "path": "/health", "expectStatus": 200 },
+    { "service": "products", "urlEnv": "PRODUCTS_HEALTH_URL", "default": "http://localhost:3002", "path": "/health", "expectStatus": 200 },
+    { "service": "orders", "urlEnv": "ORDERS_HEALTH_URL", "default": "http://localhost:3003", "path": "/health", "expectStatus": 200 },
+    { "service": "mock-payment", "urlEnv": "MOCK_PAYMENT_HEALTH_URL", "default": "http://localhost:3004", "path": "/health", "expectStatus": 200 }
+  ],
+  "tests": [
+    {
+      "name": "gateway health",
+      "request": { "method": "GET", "path": "/health" },
+      "expect": { "status": 200, "bodyContains": { "status": "ok" } }
+    },
+    {
+      "name": "AC-3 signup creates user",
+      "request": {
+        "method": "POST",
+        "path": "/auth/signup",
+        "body": { "email": "user-{{runId}}@example.com", "password": "password-{{runId}}", "name": "Tester" }
+      },
+      "expect": { "status": 201, "bodyHasKeys": ["id", "email", "role"], "bodyLacksKeys": ["password", "passwordHash"] },
+      "capture": { "userId": "id" }
+    },
+    {
+      "name": "AC-3 duplicate signup is 409",
+      "request": {
+        "method": "POST",
+        "path": "/auth/signup",
+        "body": { "email": "user-{{runId}}@example.com", "password": "password-{{runId}}" }
+      },
+      "expect": { "status": 409 }
+    },
+    {
+      "name": "signup with short password is 400",
+      "request": {
+        "method": "POST",
+        "path": "/auth/signup",
+        "body": { "email": "short-{{runId}}@example.com", "password": "short" }
+      },
+      "expect": { "status": 400 }
+    },
+    {
+      "name": "AC-3 login returns token",
+      "request": {
+        "method": "POST",
+        "path": "/auth/login",
+        "body": { "email": "user-{{runId}}@example.com", "password": "password-{{runId}}" }
+      },
+      "expect": { "status": 200, "bodyHasKeys": ["accessToken", "tokenType", "expiresIn", "user"] },
+      "capture": { "token": "accessToken" }
+    },
+    {
+      "name": "AC-3 wrong password is 401",
+      "request": {
+        "method": "POST",
+        "path": "/auth/login",
+        "body": { "email": "user-{{runId}}@example.com", "password": "wrong-password-xyz" }
+      },
+      "expect": { "status": 401 }
+    },
+    {
+      "name": "AC-5 GET /users/me without token is 401",
+      "request": { "method": "GET", "path": "/users/me" },
+      "expect": { "status": 401 }
+    },
+    {
+      "name": "AC-5 GET /users/me with forged token is 401",
+      "request": {
+        "method": "GET",
+        "path": "/users/me",
+        "headers": { "Authorization": "Bearer forged.invalid.token-{{runId}}" }
+      },
+      "expect": { "status": 401 }
+    },
+    {
+      "name": "AC-4 GET /users/me excludes password",
+      "request": {
+        "method": "GET",
+        "path": "/users/me",
+        "headers": { "Authorization": "Bearer {{token}}" }
+      },
+      "expect": { "status": 200, "bodyHasKeys": ["id", "email", "role"], "bodyLacksKeys": ["password", "passwordHash", "password_hash"] }
+    },
+    {
+      "name": "AC-6 forged x-user-id header is replaced by verified identity",
+      "request": {
+        "method": "GET",
+        "path": "/users/me",
+        "headers": {
+          "Authorization": "Bearer {{token}}",
+          "x-user-id": "00000000-0000-4000-8000-000000000000",
+          "x-user-role": "ADMIN"
+        }
+      },
+      "expect": { "status": 200, "bodyEquals": { "id": "{{userId}}" } }
+    },
+    {
+      "name": "AC-5 GET /orders without token is 401",
+      "request": { "method": "GET", "path": "/orders" },
+      "expect": { "status": 401 }
+    },
+    {
+      "name": "AC-7 new user GET /orders is empty array",
+      "request": {
+        "method": "GET",
+        "path": "/orders",
+        "headers": { "Authorization": "Bearer {{token}}" }
+      },
+      "expect": { "status": 200, "bodyIsArray": true, "arrayLength": 0 }
+    },
+    {
+      "name": "AC-8 public product list",
+      "request": { "method": "GET", "path": "/products" },
+      "expect": { "status": 200, "bodyIsArray": true }
+    },
+    {
+      "name": "AC-8 unknown product is 404",
+      "request": { "method": "GET", "path": "/products/00000000-0000-4000-8000-000000000000" },
+      "expect": { "status": 404 }
+    },
+    {
+      "name": "AC-8 POST /products without token is 401",
+      "request": {
+        "method": "POST",
+        "path": "/products",
+        "body": { "name": "x", "price": 1000, "stock": 1 }
+      },
+      "expect": { "status": 401 }
+    },
+    {
+      "name": "AC-8 USER POST /products is 403",
+      "request": {
+        "method": "POST",
+        "path": "/products",
+        "headers": { "Authorization": "Bearer {{token}}" },
+        "body": { "name": "user product", "price": 1000, "stock": 1 }
+      },
+      "expect": { "status": 403 }
+    },
+    {
+      "name": "AC-7 unknown order id is 404",
+      "request": {
+        "method": "GET",
+        "path": "/orders/00000000-0000-4000-8000-000000000000",
+        "headers": { "Authorization": "Bearer {{token}}" }
+      },
+      "expect": { "status": 404 }
+    },
+    {
+      "name": "gateway does not route /internal",
+      "request": {
+        "method": "POST",
+        "path": "/internal/reservations",
+        "headers": { "Authorization": "Bearer {{token}}" },
+        "body": {}
+      },
+      "expect": { "status": 404 }
+    },
+    {
+      "name": "gateway does not route /webhooks",
+      "request": {
+        "method": "POST",
+        "path": "/webhooks/payment",
+        "body": {}
+      },
+      "expect": { "status": 404 }
+    }
+  ]
+}

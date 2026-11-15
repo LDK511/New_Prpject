@@ -1,0 +1,245 @@
+{
+  "name": "shop-microservices",
+  "description": "NestJS 모노레포 마이크로서비스 쇼핑몰 백엔드: 게이트웨이(JWT 검증·프록시), 회원·상품·주문(사가) 서비스, 모의 결제 서버, BullMQ 알림 워커. 회원·상품·주문은 각자 전용 PostgreSQL을 Prisma로 사용합니다.",
+  "currency": "KRW",
+  "paymentMode": "mock",
+  "services": [
+    {
+      "name": "gateway",
+      "kind": "api",
+      "runtime": "node",
+      "package": "@shop/gateway",
+      "dir": "services/gateway/",
+      "port": 3000,
+      "host": "0.0.0.0",
+      "health": "GET /health",
+      "env": {
+        "PORT": "이 서비스가 들을 포트(3000)",
+        "USERS_URL": "http://users:3001",
+        "PRODUCTS_URL": "http://products:3002",
+        "ORDERS_URL": "http://orders:3003",
+        "JWT_SECRET": "로그인 토큰 서명 비밀값(필수, 기본값 없음)"
+      },
+      "dependsOn": ["users", "products", "orders"],
+      "responsibilities": [
+        "REST 라우팅: /auth/*, /users/* → users, /products(/*) → products, /orders(/*) → orders, 그 밖(/internal, /webhooks 포함) 404",
+        "공개 경로(POST /auth/signup, POST /auth/login, GET /products, GET /products/:id) 외에는 JWT(HS256) 검증, 실패 시 401 후 프록시하지 않음",
+        "클라이언트가 보낸 x-user-id/x-user-role/x-user-email 제거 후 검증된 값으로만 다시 채움",
+        "로그인 시도 제한: ${ip}:${email} 15분 5회, ip:${ip} 15분 20회, 초과 시 429 + Retry-After"
+      ]
+    },
+    {
+      "name": "users",
+      "kind": "api",
+      "runtime": "node",
+      "package": "@shop/users",
+      "dir": "services/users/",
+      "port": 3001,
+      "host": "0.0.0.0",
+      "health": "GET /health",
+      "database": "users-db",
+      "env": {
+        "PORT": "3001",
+        "USERS_DB_URL": "postgresql://...@users-db:5432/users",
+        "JWT_SECRET": "필수",
+        "JWT_EXPIRES_IN": "기본 1h"
+      },
+      "responsibilities": [
+        "회원가입(비밀번호 8~72자, bcryptjs cost 12, 중복 이메일 409)",
+        "로그인(JWT {sub,email,role}, 실패 시 일반화된 401)",
+        "GET /users/me(비밀번호·해시 제외)",
+        "ADMIN 지정은 npm run promote-admin -- <email> 로만"
+      ]
+    },
+    {
+      "name": "products",
+      "kind": "api",
+      "runtime": "node",
+      "package": "@shop/products",
+      "dir": "services/products/",
+      "port": 3002,
+      "host": "0.0.0.0",
+      "health": "GET /health",
+      "database": "products-db",
+      "env": {
+        "PORT": "3002",
+        "PRODUCTS_DB_URL": "postgresql://...@products-db:5432/products",
+        "JWT_SECRET": "필수",
+        "SEED_DEMO": "true면 상품이 없을 때만 데모 상품 삽입"
+      },
+      "responsibilities": [
+        "공개 목록·상세 조회",
+        "ADMIN 전용 등록(USER 403, 음수 가격·빈 이름 400)",
+        "내부 재고 예약/확정/해제(행 잠금 트랜잭션, reservationId 기준 멱등)"
+      ]
+    },
+    {
+      "name": "orders",
+      "kind": "api",
+      "runtime": "node",
+      "package": "@shop/orders",
+      "dir": "services/orders/",
+      "port": 3003,
+      "host": "0.0.0.0",
+      "health": "GET /health (DB + Redis ping)",
+      "database": "orders-db",
+      "env": {
+        "PORT": "3003",
+        "ORDERS_DB_URL": "postgresql://...@orders-db:5432/orders",
+        "REDIS_URL": "redis://redis:6379",
+        "PRODUCTS_URL": "http://products:3002",
+        "MOCK_PAYMENT_URL": "http://mock-payment:3004",
+        "JWT_SECRET": "필수",
+        "PAYMENT_MODE": "mock 일 때만 /pay 허용",
+        "PAYMENT_WEBHOOK_SECRET": "필수",
+        "ORDER_RESERVATION_TTL_SECONDS": "기본 900",
+        "ORDER_EXPIRY_SWEEP_MS": "기본 15000",
+        "NODE_ENV": "test(로컬 데모); production 이면 /pay 503"
+      },
+      "dependsOn": ["orders-db", "redis", "products", "mock-payment"],
+      "responsibilities": [
+        "주문 생성 시 products DB 가격으로 금액 계산·재고 예약(부족 409), PENDING_PAYMENT",
+        "사용자별 Idempotency-Key",
+        "본인 소유 검사(타인 403)",
+        "모의 결제 시작, HMAC 서명 웹훅(raw body, 누락·불일치 400, event_id UNIQUE)",
+        "오케스트레이션 사가: succeeded→confirm+PAID_TEST, failed/만료/취소→release+CANCELLED",
+        "PAID_TEST 시 Redis Stream events:orders 에 order.paid 발행"
+      ]
+    },
+    {
+      "name": "mock-payment",
+      "kind": "api",
+      "runtime": "node",
+      "package": "@shop/mock-payment",
+      "dir": "services/mock-payment/",
+      "port": 3004,
+      "host": "0.0.0.0",
+      "health": "GET /health",
+      "env": {
+        "PORT": "3004",
+        "PAYMENT_MODE": "반드시 mock",
+        "PAYMENT_WEBHOOK_SECRET": "필수",
+        "ORDERS_URL": "http://orders:3003",
+        "NODE_ENV": "production 이면 시작 거부"
+      },
+      "responsibilities": [
+        "POST /payments 로 paymentId 발급(메모리 보관)",
+        "POST /payments/:id/complete 로 서명된 웹훅을 orders 로 동기 전송"
+      ]
+    },
+    {
+      "name": "notification-worker",
+      "kind": "worker",
+      "runtime": "node",
+      "package": "@shop/notification-worker",
+      "dir": "services/notification-worker/",
+      "env": {
+        "REDIS_URL": "redis://redis:6379",
+        "SMTP_HOST": "mailhog",
+        "SMTP_PORT": "1025",
+        "SMTP_SECURE": "false",
+        "SMTP_USER": "선택",
+        "SMTP_PASS": "선택",
+        "MAIL_FROM": "보내는 주소",
+        "NOTIFY_MAX_ATTEMPTS": "기본 5",
+        "NOTIFY_BACKOFF_MS": "기본 2000"
+      },
+      "dependsOn": ["redis", "mailhog"],
+      "responsibilities": [
+        "events:orders 스트림을 consumer group notification-worker 로 읽기",
+        "order.paid → BullMQ 큐 order-notifications (jobId order-paid-<orderId>, 지수 백오프)",
+        "nodemailer SMTP 로 주문 완료 메일 발송, 최종 실패 시 failed 유지 + order-notifications-dlq 보관"
+      ]
+    }
+  ],
+  "databases": [
+    {
+      "name": "users-db",
+      "engine": "postgresql",
+      "envVar": "USERS_DB_URL",
+      "usedBy": ["users"],
+      "tables": ["users"],
+      "migrations": "services/users/prisma/migrations (prisma migrate deploy)"
+    },
+    {
+      "name": "products-db",
+      "engine": "postgresql",
+      "envVar": "PRODUCTS_DB_URL",
+      "usedBy": ["products"],
+      "tables": ["products", "stock_reservations"],
+      "migrations": "services/products/prisma/migrations (prisma migrate deploy)"
+    },
+    {
+      "name": "orders-db",
+      "engine": "postgresql",
+      "envVar": "ORDERS_DB_URL",
+      "usedBy": ["orders"],
+      "tables": ["orders", "order_items", "payment_events"],
+      "migrations": "services/orders/prisma/migrations (prisma migrate deploy)"
+    },
+    {
+      "name": "redis",
+      "engine": "redis",
+      "envVar": "REDIS_URL",
+      "usedBy": ["orders", "notification-worker"],
+      "keys": ["events:orders (stream)", "bull:order-notifications:*", "bull:order-notifications-dlq:*"]
+    }
+  ],
+  "supporting": [
+    { "name": "mailhog", "image": "mailhog/mailhog", "ports": { "smtp": 1025, "ui": 8025 } }
+  ],
+  "apis": [
+    { "service": "gateway", "method": "POST", "path": "/auth/signup", "auth": false },
+    { "service": "gateway", "method": "POST", "path": "/auth/login", "auth": false },
+    { "service": "gateway", "method": "GET", "path": "/users/me", "auth": true },
+    { "service": "gateway", "method": "GET", "path": "/products", "auth": false },
+    { "service": "gateway", "method": "GET", "path": "/products/:id", "auth": false },
+    { "service": "gateway", "method": "POST", "path": "/products", "auth": true, "role": "ADMIN" },
+    { "service": "gateway", "method": "GET", "path": "/orders", "auth": true },
+    { "service": "gateway", "method": "GET", "path": "/orders/:id", "auth": true },
+    { "service": "gateway", "method": "POST", "path": "/orders", "auth": true },
+    { "service": "gateway", "method": "POST", "path": "/orders/:id/pay", "auth": true },
+    { "service": "gateway", "method": "POST", "path": "/orders/:id/cancel", "auth": true },
+    { "service": "users", "method": "POST", "path": "/auth/signup", "auth": false },
+    { "service": "users", "method": "POST", "path": "/auth/login", "auth": false },
+    { "service": "users", "method": "GET", "path": "/users/me", "auth": true },
+    { "service": "products", "method": "GET", "path": "/products", "auth": false },
+    { "service": "products", "method": "GET", "path": "/products/:id", "auth": false },
+    { "service": "products", "method": "POST", "path": "/products", "auth": true, "role": "ADMIN" },
+    { "service": "products", "method": "POST", "path": "/internal/reservations", "internal": true },
+    { "service": "products", "method": "POST", "path": "/internal/reservations/:id/confirm", "internal": true },
+    { "service": "products", "method": "POST", "path": "/internal/reservations/:id/release", "internal": true },
+    { "service": "orders", "method": "GET", "path": "/orders", "auth": true },
+    { "service": "orders", "method": "GET", "path": "/orders/:id", "auth": true },
+    { "service": "orders", "method": "POST", "path": "/orders", "auth": true },
+    { "service": "orders", "method": "POST", "path": "/orders/:id/pay", "auth": true },
+    { "service": "orders", "method": "POST", "path": "/orders/:id/cancel", "auth": true },
+    { "service": "orders", "method": "POST", "path": "/webhooks/payment", "auth": false, "signature": "x-mock-signature: t=<unix>,v1=HMAC-SHA256(PAYMENT_WEBHOOK_SECRET, `${t}.${rawBody}`)", "internal": true },
+    { "service": "mock-payment", "method": "POST", "path": "/payments", "internal": true },
+    { "service": "mock-payment", "method": "POST", "path": "/payments/:id/complete", "internal": true }
+  ],
+  "jwt": {
+    "algorithm": "HS256",
+    "payload": { "sub": "userId(uuid)", "email": "string", "role": "USER|ADMIN" },
+    "issuer": "users",
+    "verifiedBy": ["gateway", "users", "products", "orders"]
+  },
+  "events": [
+    {
+      "channel": "redis stream events:orders",
+      "type": "order.paid",
+      "producer": "orders",
+      "consumer": "notification-worker (group notification-worker)",
+      "payload": "OrderPaidEvent {orderId,userId,email,totalAmount,currency,items[],paidAt}"
+    }
+  ],
+  "queues": [
+    { "name": "order-notifications", "engine": "bullmq", "attempts": 5, "backoff": "exponential" },
+    { "name": "order-notifications-dlq", "engine": "bullmq", "purpose": "최종 실패 잡 보관" }
+  ],
+  "orderStateMachine": {
+    "PENDING_PAYMENT": ["PAID_TEST", "CANCELLED"],
+    "PAID_TEST": [],
+    "CANCELLED": []
+  }
+}

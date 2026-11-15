@@ -1,0 +1,73 @@
+// 주문 서비스 전용 DB(orders-db) 스키마.
+// 회원·상품 DB에는 접속하지 않으며, ORDERS_DB_URL 하나만 사용합니다.
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("ORDERS_DB_URL")
+}
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  PAID_TEST
+  CANCELLED
+}
+
+model Order {
+  id                   String      @id @default(uuid()) @db.Uuid
+  userId               String      @map("user_id") @db.Uuid
+  userEmail            String      @map("user_email")
+  status               OrderStatus @default(PENDING_PAYMENT)
+  // 원 단위 정수 금액(KRW). products DB 가격으로만 계산합니다.
+  totalAmount          Int         @map("total_amount")
+  currency             String      @default("KRW")
+  idempotencyKey       String?     @map("idempotency_key")
+  paymentId            String?     @unique @map("payment_id")
+  // 'PAYMENT_FAILED' | 'EXPIRED' | 'USER_CANCELLED'
+  cancelReason         String?     @map("cancel_reason")
+  expiresAt            DateTime    @map("expires_at") @db.Timestamptz(3)
+  paidAt               DateTime?   @map("paid_at") @db.Timestamptz(3)
+  paidEventPublishedAt DateTime?   @map("paid_event_published_at") @db.Timestamptz(3)
+  createdAt            DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt            DateTime    @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  items OrderItem[]
+
+  @@unique([userId, idempotencyKey])
+  @@index([status, expiresAt])
+  @@index([userId, createdAt])
+  @@map("orders")
+}
+
+model OrderItem {
+  id          String @id @default(uuid()) @db.Uuid
+  orderId     String @map("order_id") @db.Uuid
+  productId   String @map("product_id") @db.Uuid
+  productName String @map("product_name")
+  unitPrice   Int    @map("unit_price")
+  quantity    Int
+  lineTotal   Int    @map("line_total")
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@map("order_items")
+}
+
+model PaymentEvent {
+  id         String   @id @default(uuid()) @db.Uuid
+  // 결제 이벤트 ID UNIQUE: 같은 웹훅의 중복 처리를 막습니다.
+  eventId    String   @unique @map("event_id")
+  type       String
+  orderId    String   @map("order_id") @db.Uuid
+  paymentId  String   @map("payment_id")
+  payload    Json     @db.JsonB
+  receivedAt DateTime @default(now()) @map("received_at") @db.Timestamptz(3)
+
+  @@index([orderId])
+  @@map("payment_events")
+}

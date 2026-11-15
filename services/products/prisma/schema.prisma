@@ -1,0 +1,37 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("PRODUCTS_DB_URL")
+}
+
+// CHECK 제약(price>=0, stock>=0, reserved>=0, reserved<=stock)은 마이그레이션 SQL과 서비스 코드에서 검사합니다.
+model Product {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String
+  description String   @default("")
+  price       Int
+  currency    String   @default("KRW")
+  stock       Int      @default(0)
+  reserved    Int      @default(0)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@index([createdAt])
+  @@map("products")
+}
+
+// id = reservationId = orderId. status: 'RESERVED' | 'CONFIRMED' | 'RELEASED'
+model StockReservation {
+  id          String   @id @db.Uuid
+  status      String
+  items       Json
+  totalAmount Int      @map("total_amount")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@map("stock_reservations")
+}

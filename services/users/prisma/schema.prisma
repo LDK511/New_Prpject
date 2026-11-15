@@ -1,0 +1,30 @@
+// 회원 서비스 전용 Prisma 스키마 — users-db(USERS_DB_URL)에만 접속합니다.
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("USERS_DB_URL")
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  // 항상 소문자로 정규화해 저장합니다(서비스 코드에서 처리).
+  email        String   @unique
+  // bcryptjs(cost 12) 해시만 저장합니다. API 응답에는 절대 포함하지 않습니다.
+  passwordHash String   @map("password_hash")
+  name         String?
+  role         Role     @default(USER)
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@map("users")
+}

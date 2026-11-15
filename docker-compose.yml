@@ -1,0 +1,248 @@
+# 마이크로서비스 쇼핑몰 로컬 일괄 실행용 compose 파일 (모의 결제 데모)
+# 사용법: cp .env.example .env  →  .env의 비밀값 채우기  →  docker compose up --build
+# 비밀값(JWT_SECRET, PAYMENT_WEBHOOK_SECRET, *_DB_PASSWORD)은 기본값이 없어서, 비어 있으면 compose가 시작을 거부합니다.
+# 회원·상품·주문 서비스는 각자 전용 PostgreSQL 인스턴스만 씁니다(DB URL이 서로 다름).
+
+name: shop-msa
+
+services:
+  # ---------------------------------------------------------------- 데이터 저장소
+  users-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: users
+      POSTGRES_USER: users
+      POSTGRES_PASSWORD: ${USERS_DB_PASSWORD:?set USERS_DB_PASSWORD in .env}
+    volumes:
+      - users-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U users -d users"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  products-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: products
+      POSTGRES_USER: products
+      POSTGRES_PASSWORD: ${PRODUCTS_DB_PASSWORD:?set PRODUCTS_DB_PASSWORD in .env}
+    volumes:
+      - products-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U products -d products"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  orders-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: orders
+      POSTGRES_USER: orders
+      POSTGRES_PASSWORD: ${ORDERS_DB_PASSWORD:?set ORDERS_DB_PASSWORD in .env}
+    volumes:
+      - orders-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orders -d orders"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # 테스트용 SMTP 서버입니다. 서비스 이름은 mailhog이고 SMTP는 1025, 웹 UI는 8025 포트입니다.
+  # 여러 CPU 아키텍처를 지원하는 MailHog 호환 이미지(mailpit)를 씁니다.
+  mailhog:
+    image: axllent/mailpit:v1.27
+    ports:
+      - "127.0.0.1:8025:8025"
+      - "127.0.0.1:1025:1025"
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------- 애플리케이션 서비스
+  gateway:
+    build:
+      context: ./services/gateway
+      dockerfile: Dockerfile
+    environment:
+      PORT: "3000"
+      USERS_URL: http://users:3001
+      PRODUCTS_URL: http://products:3002
+      ORDERS_URL: http://orders:3003
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+    ports:
+      - "3000:3000"
+    depends_on:
+      users:
+        condition: service_started
+      products:
+        condition: service_started
+      orders:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  users:
+    build:
+      context: ./services/users
+      dockerfile: Dockerfile
+    environment:
+      PORT: "3001"
+      USERS_DB_URL: postgresql://users:${USERS_DB_PASSWORD:?set USERS_DB_PASSWORD in .env}@users-db:5432/users?schema=public
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-1h}
+    ports:
+      - "127.0.0.1:3001:3001"
+    depends_on:
+      users-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3001/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    restart: unless-stopped
+
+  products:
+    build:
+      context: ./services/products
+      dockerfile: Dockerfile
+    environment:
+      PORT: "3002"
+      PRODUCTS_DB_URL: postgresql://products:${PRODUCTS_DB_PASSWORD:?set PRODUCTS_DB_PASSWORD in .env}@products-db:5432/products?schema=public
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      SEED_DEMO: ${SEED_DEMO:-false}
+    ports:
+      - "127.0.0.1:3002:3002"
+    depends_on:
+      products-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3002/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    restart: unless-stopped
+
+  orders:
+    build:
+      context: ./services/orders
+      dockerfile: Dockerfile
+    environment:
+      PORT: "3003"
+      # 로컬 데모는 모의 결제를 쓰므로 test 환경으로 실행합니다(production에서는 /pay가 503을 돌려줌).
+      NODE_ENV: test
+      ORDERS_DB_URL: postgresql://orders:${ORDERS_DB_PASSWORD:?set ORDERS_DB_PASSWORD in .env}@orders-db:5432/orders?schema=public
+      REDIS_URL: redis://redis:6379
+      PRODUCTS_URL: http://products:3002
+      MOCK_PAYMENT_URL: http://mock-payment:3004
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      PAYMENT_MODE: mock
+      PAYMENT_WEBHOOK_SECRET: ${PAYMENT_WEBHOOK_SECRET:?set PAYMENT_WEBHOOK_SECRET in .env}
+      ORDER_RESERVATION_TTL_SECONDS: ${ORDER_RESERVATION_TTL_SECONDS:-900}
+      ORDER_EXPIRY_SWEEP_MS: ${ORDER_EXPIRY_SWEEP_MS:-15000}
+    ports:
+      - "127.0.0.1:3003:3003"
+    depends_on:
+      orders-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      products:
+        condition: service_started
+      mock-payment:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3003/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    restart: unless-stopped
+
+  mock-payment:
+    build:
+      context: ./services/mock-payment
+      # 파일 목록에 mock-payment용 Dockerfile이 없어서 빌드 정의를 여기에 직접 적습니다.
+      dockerfile_inline: |
+        FROM node:20-alpine AS build
+        WORKDIR /app
+        COPY package.json ./
+        RUN npm install
+        COPY tsconfig.json ./
+        COPY src ./src
+        RUN npm run build
+
+        FROM node:20-alpine
+        WORKDIR /app
+        COPY package.json ./
+        RUN npm install --omit=dev && npm cache clean --force
+        COPY --from=build /app/dist ./dist
+        RUN addgroup -g 1001 -S app && adduser -S -u 1001 -G app app
+        USER 1001
+        EXPOSE 3004
+        CMD ["node", "dist/main.js"]
+    environment:
+      PORT: "3004"
+      # 모의 결제 서버는 PAYMENT_MODE=mock일 때만 동작하고, NODE_ENV=production이면 시작을 거부합니다.
+      NODE_ENV: test
+      PAYMENT_MODE: mock
+      PAYMENT_WEBHOOK_SECRET: ${PAYMENT_WEBHOOK_SECRET:?set PAYMENT_WEBHOOK_SECRET in .env}
+      ORDERS_URL: http://orders:3003
+    ports:
+      - "127.0.0.1:3004:3004"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3004/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  notification-worker:
+    build:
+      context: ./services/notification-worker
+      dockerfile: Dockerfile
+    environment:
+      REDIS_URL: redis://redis:6379
+      SMTP_HOST: ${SMTP_HOST:-mailhog}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_SECURE: ${SMTP_SECURE:-false}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      MAIL_FROM: ${MAIL_FROM:-Shop <no-reply@shop.local>}
+      NOTIFY_MAX_ATTEMPTS: ${NOTIFY_MAX_ATTEMPTS:-5}
+      NOTIFY_BACKOFF_MS: ${NOTIFY_BACKOFF_MS:-2000}
+    depends_on:
+      redis:
+        condition: service_healthy
+      mailhog:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  users-db-data:
+  products-db-data:
+  orders-db-data:
+  redis-data:
