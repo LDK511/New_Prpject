@@ -1,23 +1,24 @@
-import { Controller, Get, HttpCode, HttpException, HttpStatus } from '@nestjs/common';
+import { Controller, Get, HttpStatus, Res } from '@nestjs/common';
+import type { Response } from 'express';
 import { PrismaService } from './prisma.service';
 
-@Controller()
+@Controller('health')
 export class HealthController {
   constructor(private readonly prisma: PrismaService) {}
 
-  // GET /health — users-db 연결이 정상이면 200 {"status":"ok"}, 아니면 503 {"status":"error"}
-  @Get('health')
-  @HttpCode(HttpStatus.OK)
-  async health(): Promise<{ status: 'ok' }> {
-    let healthy = false;
+  @Get()
+  async health(@Res({ passthrough: true }) res: Response): Promise<{ status: 'ok' | 'error' }> {
+    let ok = false;
     try {
-      healthy = await this.prisma.isHealthy();
+      ok = await this.prisma.isHealthy();
     } catch {
-      healthy = false;
+      ok = false;
     }
-    if (!healthy) {
-      throw new HttpException({ status: 'error' }, HttpStatus.SERVICE_UNAVAILABLE);
+    if (!ok) {
+      res.status(HttpStatus.SERVICE_UNAVAILABLE);
+      return { status: 'error' };
     }
+    res.status(HttpStatus.OK);
     return { status: 'ok' };
   }
 }

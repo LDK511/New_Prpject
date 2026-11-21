@@ -1,11 +1,23 @@
 import { Module } from '@nestjs/common';
 import { HealthController } from './health.controller';
-import { ProxyController } from './proxy.controller';
-import { LoginRateLimiter } from './rate-limiter';
+import { GatewayController } from './proxy/gateway.controller';
+import { ProxyService } from './proxy/proxy.service';
+import { LoginRateLimiter } from './rate-limit/login-rate-limiter';
+import { intEnv } from './config';
 
-// 컨트롤러 순서가 중요합니다: /health 를 먼저 처리하고, 나머지 모든 경로는 ProxyController(@All('*path'))가 받습니다.
 @Module({
-  controllers: [HealthController, ProxyController],
-  providers: [LoginRateLimiter],
+  controllers: [HealthController, GatewayController],
+  providers: [
+    ProxyService,
+    {
+      provide: LoginRateLimiter,
+      useFactory: (): LoginRateLimiter =>
+        new LoginRateLimiter({
+          maxPerKey: intEnv('LOGIN_MAX_ATTEMPTS', 5),
+          maxPerIp: intEnv('LOGIN_MAX_ATTEMPTS_PER_IP', 20),
+          windowSec: intEnv('LOGIN_WINDOW_SECONDS', 900),
+        }),
+    },
+  ],
 })
 export class AppModule {}

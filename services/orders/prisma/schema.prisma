@@ -1,9 +1,6 @@
-// 주문 서비스 전용 DB(orders-db) 스키마.
-// 회원·상품 DB에는 접속하지 않으며, ORDERS_DB_URL 하나만 사용합니다.
-
 generator client {
   provider      = "prisma-client-js"
-  binaryTargets = ["native", "linux-musl-openssl-3.0.x", "debian-openssl-3.0.x"]
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
 }
 
 datasource db {
@@ -11,63 +8,48 @@ datasource db {
   url      = env("ORDERS_DB_URL")
 }
 
-enum OrderStatus {
-  PENDING_PAYMENT
-  PAID_TEST
-  CANCELLED
-}
-
+/// status 는 DB CHECK (status IN ('PENDING_PAYMENT','PAID_TEST','FAILED','CANCELLED','EXPIRED')) 로 제한됩니다.
+/// reservation_status 는 DB CHECK (reservation_status IN ('RESERVED','CONFIRMED','RELEASED')) 로 제한됩니다.
+/// id 는 orders 서비스가 randomUUID() 로 미리 만들어 넣습니다.
 model Order {
-  id                   String      @id @default(uuid()) @db.Uuid
-  userId               String      @map("user_id") @db.Uuid
-  userEmail            String      @map("user_email")
-  status               OrderStatus @default(PENDING_PAYMENT)
-  // 원 단위 정수 금액(KRW). products DB 가격으로만 계산합니다.
-  totalAmount          Int         @map("total_amount")
-  currency             String      @default("KRW")
-  idempotencyKey       String?     @map("idempotency_key")
-  paymentId            String?     @unique @map("payment_id")
-  // 'PAYMENT_FAILED' | 'EXPIRED' | 'USER_CANCELLED'
-  cancelReason         String?     @map("cancel_reason")
-  expiresAt            DateTime    @map("expires_at") @db.Timestamptz(3)
-  paidAt               DateTime?   @map("paid_at") @db.Timestamptz(3)
-  paidEventPublishedAt DateTime?   @map("paid_event_published_at") @db.Timestamptz(3)
-  createdAt            DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt            DateTime    @updatedAt @map("updated_at") @db.Timestamptz(3)
+  id                String      @id @db.Uuid
+  userId            String      @map("user_id") @db.Uuid
+  idempotencyKey    String      @map("idempotency_key")
+  status            String
+  totalAmount       Int         @map("total_amount")
+  currency          String      @default("KRW")
+  reservationId     String      @map("reservation_id") @db.Uuid
+  reservationStatus String      @map("reservation_status")
+  paymentId         String?     @unique @map("payment_id")
+  failureReason     String?     @map("failure_reason")
+  paidAt            DateTime?   @map("paid_at") @db.Timestamptz(6)
+  shipRecipient     String      @default("") @map("ship_recipient")
+  shipPhone         String      @default("") @map("ship_phone")
+  shipZipcode       String      @default("") @map("ship_zipcode")
+  shipAddress1      String      @default("") @map("ship_address1")
+  shipAddress2      String      @default("") @map("ship_address2")
+  shipMemo          String      @default("") @map("ship_memo")
+  createdAt         DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime    @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  items             OrderItem[]
 
-  items OrderItem[]
-
-  @@unique([userId, idempotencyKey])
-  @@index([status, expiresAt])
-  @@index([userId, createdAt])
+  @@unique([userId, idempotencyKey], map: "orders_user_id_idempotency_key_key")
+  @@index([userId], map: "orders_user_id_idx")
+  @@index([status, createdAt], map: "orders_status_created_at_idx")
   @@map("orders")
 }
 
+/// quantity 는 DB CHECK (quantity > 0) 로 제한됩니다.
 model OrderItem {
-  id          String @id @default(uuid()) @db.Uuid
+  id          String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   orderId     String @map("order_id") @db.Uuid
   productId   String @map("product_id") @db.Uuid
   productName String @map("product_name")
   unitPrice   Int    @map("unit_price")
   quantity    Int
   lineTotal   Int    @map("line_total")
+  order       Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
-  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
-
-  @@index([orderId])
+  @@index([orderId], map: "order_items_order_id_idx")
   @@map("order_items")
-}
-
-model PaymentEvent {
-  id         String   @id @default(uuid()) @db.Uuid
-  // 결제 이벤트 ID UNIQUE: 같은 웹훅의 중복 처리를 막습니다.
-  eventId    String   @unique @map("event_id")
-  type       String
-  orderId    String   @map("order_id") @db.Uuid
-  paymentId  String   @map("payment_id")
-  payload    Json     @db.JsonB
-  receivedAt DateTime @default(now()) @map("received_at") @db.Timestamptz(3)
-
-  @@index([orderId])
-  @@map("payment_events")
 }

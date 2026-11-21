@@ -1,14 +1,9 @@
 node_modules
 dist
-npm-debug.log*
 .env
 .env.*
 !.env.example
 .git
-.gitignore
-Dockerfile
-.dockerignore
-coverage
-*.log
-.vscode
-.idea
+__pycache__
+*.pyc
+.venv

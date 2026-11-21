@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 600" role="img">
+<defs>
+<linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#e0e7ff"/><stop offset="1" stop-color="#a5b4fc"/></linearGradient>
+<linearGradient id="dark" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3b4252"/><stop offset="1" stop-color="#1f2430"/></linearGradient>
+<linearGradient id="metal" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f4f5f7"/><stop offset="1" stop-color="#b9bfca"/></linearGradient>
+<linearGradient id="acc" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#4f46e5"/><stop offset="1" stop-color="#4f46e5" stop-opacity=".7"/></linearGradient>
+</defs>
+<rect width="800" height="600" fill="url(#bg)"/>
+<circle cx="640" cy="120" r="180" fill="#fff" opacity=".18"/>
+<circle cx="120" cy="520" r="140" fill="#fff" opacity=".12"/>
+<ellipse cx="400" cy="505" rx="250" ry="22" fill="#000" opacity=".12"/>
+<rect x="230" y="170" width="340" height="170" rx="85" fill="url(#dark)"/><circle cx="400" cy="255" r="62" fill="#11141b"/><circle cx="400" cy="255" r="42" fill="url(#acc)"/>
+<circle cx="400" cy="255" r="18" fill="#11141b"/><circle cx="386" cy="240" r="8" fill="#fff" opacity=".7"/><circle cx="520" cy="216" r="7" fill="#22c55e"/>
+<path d="M360 340l-30 60h140l-30-60z" fill="url(#metal)"/><rect x="290" y="398" width="220" height="90" rx="14" fill="#3b4252"/>
+</svg>

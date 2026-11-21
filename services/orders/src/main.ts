@@ -1,88 +1,133 @@
 import 'reflect-metadata';
-import { Logger } from '@nestjs/common';
+import { Logger, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
-import express, { NextFunction, Request, Response } from 'express';
-import { createHmac } from 'crypto';
-import { requireEnv } from './auth/jwt-auth.guard';
-import { runMigrations } from './migrate';
+import { NestExpressApplication } from '@nestjs/platform-express';
+import { existsSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { AppModule } from './app.module';
+import { intEnv, requireEnv } from './config';
+import { PrismaService } from './prisma.service';
 
-const logger = new Logger('OrdersMain');
+const REQUIRED_TABLES = ['orders', 'order_items'];
 
-const WEBHOOK_PATH = '/webhooks/payment';
-
-function checkEnv(): void {
-  // 필수 비밀값과 접속 주소는 기본값 없이 반드시 환경 변수로 받습니다.
-  // requireEnv 는 값이 없으면 process.exit(1) 로 시작을 거부합니다.
-  const required = [
-    'ORDERS_DB_URL',
-    'JWT_SECRET',
-    'REDIS_URL',
-    'PRODUCTS_URL',
-    'MOCK_PAYMENT_URL',
+function findMigrationFile(): string {
+  const rel = 'prisma/migrations/0001_init/migration.sql';
+  const candidates = [
+    resolve(__dirname, '..', rel),
+    resolve(__dirname, '..', '..', rel),
+    resolve(process.cwd(), rel),
+    resolve('/app', rel),
   ];
-  for (const name of required) {
-    const value = process.env[name];
-    if (!value || value.trim() === '') {
-      // eslint-disable-next-line no-console
-      console.error(`[orders] Missing required environment variable: ${name}`);
-      process.exit(1);
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      return candidate;
     }
-    requireEnv(name);
   }
+  throw new Error(`migration file not found (tried: ${candidates.join(', ')})`);
+}
 
-  // 웹훅 서명 키가 따로 주어지지 않으면 JWT_SECRET 에서 용도 분리된 키를 파생합니다.
-  // (고정 기본값이 아니라 필수 비밀값에서 HMAC 으로 파생하므로 비밀값 없이 시작되지 않습니다.)
-  const webhookSecret = process.env.PAYMENT_WEBHOOK_SECRET;
-  if (!webhookSecret || webhookSecret.trim() === '') {
-    const jwtSecret = requireEnv('JWT_SECRET');
-    process.env.PAYMENT_WEBHOOK_SECRET = createHmac('sha256', jwtSecret)
-      .update('payment-webhook-signing-key')
-      .digest('hex');
-    logger.warn('PAYMENT_WEBHOOK_SECRET not set; derived webhook signing key from JWT_SECRET. Set it explicitly in production.');
-  }
+function splitSqlStatements(sql: string): string[] {
+  const withoutComments = sql
+    .split('\n')
+    .filter((line) => !line.trim().startsWith('--'))
+    .join('\n');
+  return withoutComments
+    .split(/;\s*(?:\r?\n|$)/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
 
-  if (process.env.NODE_ENV === 'production' && process.env.PAYMENT_MODE === 'mock') {
-    logger.warn('PAYMENT_MODE=mock is ignored in production; POST /orders/:id/pay will return 503.');
+async function tableExists(prisma: PrismaService, table: string): Promise<boolean> {
+  const rows = await prisma.$queryRawUnsafe<Array<{ name: string | null }>>(
+    'SELECT to_regclass($1)::text AS name',
+    `public.${table}`,
+  );
+  return rows.length > 0 && rows[0].name !== null;
+}
+
+/**
+ * 시작 시 orders/order_items 테이블이 없으면 Prisma 마이그레이션 SQL을 적용합니다.
+ * 기존 테이블은 절대 삭제하지 않으며, 동시 시작에 대비해 advisory lock 을 사용합니다.
+ */
+async function ensureSchema(prisma: PrismaService, logger: Logger): Promise<void> {
+  await prisma.$transaction(
+    async (tx) => {
+      await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(724100301)');
+      const existing: string[] = [];
+      for (const table of REQUIRED_TABLES) {
+        const rows = await tx.$queryRawUnsafe<Array<{ name: string | null }>>(
+          'SELECT to_regclass($1)::text AS name',
+          `public.${table}`,
+        );
+        if (rows.length > 0 && rows[0].name !== null) {
+          existing.push(table);
+        }
+      }
+      if (existing.length === REQUIRED_TABLES.length) {
+        logger.log('orders schema already present');
+        return;
+      }
+      if (existing.length > 0) {
+        throw new Error(
+          `partial orders schema detected (present: ${existing.join(', ')}); run prisma migrate deploy`,
+        );
+      }
+      const file = findMigrationFile();
+      const statements = splitSqlStatements(readFileSync(file, 'utf8'));
+      for (const statement of statements) {
+        await tx.$executeRawUnsafe(statement);
+      }
+      logger.log(`orders schema created from ${file} (${statements.length} statements)`);
+    },
+    { timeout: 60000, maxWait: 30000 },
+  );
+  for (const table of REQUIRED_TABLES) {
+    if (!(await tableExists(prisma, table))) {
+      throw new Error(`table ${table} still missing after schema initialization`);
+    }
   }
 }
 
-process.on('unhandledRejection', (reason) => {
-  logger.error(`Unhandled rejection: ${reason instanceof Error ? reason.stack ?? reason.message : String(reason)}`);
-});
-
 async function bootstrap(): Promise<void> {
-  checkEnv();
+  const logger = new Logger('OrdersBootstrap');
 
-  // 서비스 전용 DB(orders-db)에 Prisma Migrate 적용. DB 준비 전이면 재시도합니다.
-  await runMigrations();
+  // 지금은 모의 결제만 지원합니다. 주문은 '결제 완료(테스트)'(PAID_TEST)로만 표시되며
+  // 실제 결제 완료(PAID) 상태는 만들지 않습니다. 컨테이너가 NODE_ENV=production 으로 떠도
+  // 데모 배포가 시작되도록 거절 대신 경고만 남깁니다.
+  if (process.env.NODE_ENV === 'production') {
+    logger.warn(
+      'Running with the mock (test) payment provider only: orders are marked PAID_TEST, never real PAID. Configure a real payment provider before real production use.',
+    );
+  }
 
-  // 환경 변수 준비 후에 모듈을 불러옵니다(모듈 로드 시점에 환경 변수를 읽는 경우 대비).
-  const { AppModule } = await import('./app.module');
+  // 필수 환경 변수 확인(없으면 requireEnv 가 에러 로그 후 종료)
+  requireEnv('JWT_SECRET');
+  requireEnv('ORDERS_DB_URL');
+  requireEnv('REDIS_URL');
+  requireEnv('PRODUCTS_URL');
+  requireEnv('MOCK_PAYMENT_URL');
 
-  // 웹훅 서명 검증을 위해 raw body 가 필요하므로 기본 body parser 를 끕니다.
-  const app = await NestFactory.create(AppModule, { bodyParser: false });
+  const port = intEnv('PORT', 3003);
 
-  // 1) 웹훅 경로: raw body(Buffer) 파서를 JSON 파서보다 먼저 등록
-  app.use(WEBHOOK_PATH, express.raw({ type: '*/*', limit: '256kb' }));
-
-  // 2) 나머지 경로: JSON 파서 (웹훅 경로는 건너뜀)
-  const jsonParser = express.json({ limit: '100kb' });
-  app.use((req: Request, res: Response, next: NextFunction) => {
-    if (req.path === WEBHOOK_PATH || req.originalUrl.split('?')[0] === WEBHOOK_PATH) {
-      next();
-      return;
-    }
-    jsonParser(req, res, next);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    bodyParser: false,
   });
 
+  await ensureSchema(app.get(PrismaService), logger);
+
+  app.disable('x-powered-by');
+  app.useBodyParser('json', { limit: '100kb' });
+  app.useGlobalPipes(
+    new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }),
+  );
   app.enableShutdownHooks();
 
-  const port = Number(process.env.PORT || 3003);
   await app.listen(port, '0.0.0.0');
   logger.log(`orders service listening on 0.0.0.0:${port}`);
 }
 
 bootstrap().catch((err: unknown) => {
-  logger.error(`Failed to start orders service: ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
+  const message = err instanceof Error ? err.message : String(err);
+  console.error(`[orders] failed to start: ${message}`);
   process.exit(1);
 });

@@ -1,162 +1,136 @@
-import {
-  BadRequestException,
-  ForbiddenException,
-  Injectable,
-  Logger,
-  NotFoundException,
-  OnModuleInit,
-} from '@nestjs/common';
-import type { Product } from '@prisma/client';
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma.service';
-import type { AuthUser } from '../auth/jwt-auth.guard';
+import {
+  CategoryDto,
+  CreateProductDto,
+  ListProductsQueryDto,
+  NO_RATING,
+  ProductDto,
+  RatingSummary,
+  UpdateProductDto,
+  roundRating,
+  sortProducts,
+  toProductDto,
+} from './dto';
 
-export interface ProductDto {
-  id: string;
-  name: string;
-  description: string;
-  price: number;
-  currency: string;
-  stock: number;
-  reserved: number;
-  available: number;
-  createdAt: string;
-  updatedAt: string;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const MAX_LIST = 500;
+
+export function isUuid(v: string): boolean {
+  return typeof v === 'string' && UUID_RE.test(v);
 }
-
-export interface CreateProductInput {
-  name: string;
-  description: string;
-  price: number;
-  stock: number;
-}
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const MAX_INT = 2147483647;
-
-export function isUuid(value: unknown): value is string {
-  return typeof value === 'string' && UUID_RE.test(value);
-}
-
-export function toProductDto(p: Product): ProductDto {
-  return {
-    id: p.id,
-    name: p.name,
-    description: p.description,
-    price: p.price,
-    currency: p.currency,
-    stock: p.stock,
-    reserved: p.reserved,
-    available: p.stock - p.reserved,
-    createdAt: p.createdAt.toISOString(),
-    updatedAt: p.updatedAt.toISOString(),
-  };
-}
-
-function isNonNegativeInt(v: unknown): v is number {
-  return typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= MAX_INT;
-}
-
-/** 요청 본문을 검증하고 정규화합니다. 실패하면 400. */
-export function validateCreateProduct(body: unknown): CreateProductInput {
-  if (typeof body !== 'object' || body === null || Array.isArray(body)) {
-    throw new BadRequestException('Request body must be an object');
-  }
-  const b = body as Record<string, unknown>;
-  const errors: string[] = [];
-
-  let name = '';
-  if (typeof b.name !== 'string') {
-    errors.push('name must be a string');
-  } else {
-    name = b.name.trim();
-    if (name.length < 1 || name.length > 200) errors.push('name must be 1-200 characters');
-  }
-
-  let description = '';
-  if (b.description !== undefined && b.description !== null) {
-    if (typeof b.description !== 'string') errors.push('description must be a string');
-    else if (b.description.length > 5000) errors.push('description must be at most 5000 characters');
-    else description = b.description;
-  }
-
-  if (!isNonNegativeInt(b.price)) errors.push('price must be a non-negative integer (KRW)');
-
-  let stock = 0;
-  if (b.stock !== undefined && b.stock !== null) {
-    if (!isNonNegativeInt(b.stock)) errors.push('stock must be a non-negative integer');
-    else stock = b.stock;
-  }
-
-  if (errors.length > 0) throw new BadRequestException(errors);
-  return { name, description, price: b.price as number, stock };
-}
-
-const DEMO_PRODUCTS: CreateProductInput[] = [
-  { name: '데모 머그컵', description: '테스트용 머그컵', price: 12000, stock: 50 },
-  { name: '데모 티셔츠', description: '테스트용 면 티셔츠', price: 25000, stock: 30 },
-  { name: '데모 노트', description: '테스트용 A5 노트', price: 5000, stock: 5 },
-];
 
 @Injectable()
-export class ProductsService implements OnModuleInit {
-  private readonly logger = new Logger(ProductsService.name);
-
+export class ProductsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async onModuleInit(): Promise<void> {
-    if (process.env.SEED_DEMO === 'true') {
-      try {
-        const n = await this.seedDemoIfEmpty();
-        if (n > 0) this.logger.log(`데모 상품 ${n}개를 넣었습니다.`);
-      } catch (err) {
-        this.logger.error(`데모 상품 시드 실패: ${(err as Error).message}`);
-      }
-    }
-  }
-
-  /** 상품이 하나도 없을 때만 데모 상품을 넣습니다(동시 시작에도 advisory lock으로 중복 방지). */
-  async seedDemoIfEmpty(): Promise<number> {
-    return this.prisma.$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(424242)`;
-      const count = await tx.product.count();
-      if (count > 0) return 0;
-      const res = await tx.product.createMany({
-        data: DEMO_PRODUCTS.map((p) => ({ ...p, currency: 'KRW' })),
-      });
-      return res.count;
+  /** 상품 ID 목록의 평점 요약(리뷰가 없는 상품은 결과에 없습니다). */
+  async ratings(productIds: string[]): Promise<Map<string, RatingSummary>> {
+    const out = new Map<string, RatingSummary>();
+    if (productIds.length === 0) return out;
+    const rows = await this.prisma.review.groupBy({
+      by: ['productId'],
+      where: { productId: { in: productIds } },
+      _avg: { rating: true },
+      _count: { _all: true },
     });
+    for (const r of rows) {
+      out.set(r.productId, { ratingAvg: roundRating(r._avg.rating), reviewCount: r._count._all });
+    }
+    return out;
   }
 
-  async list(): Promise<ProductDto[]> {
-    const rows = await this.prisma.product.findMany({ orderBy: { createdAt: 'desc' } });
-    return rows.map(toProductDto);
+  async list(query: ListProductsQueryDto = {}): Promise<ProductDto[]> {
+    const where: Prisma.ProductWhereInput = { isActive: true };
+    if (query.category) where.category = query.category;
+    if (query.q) {
+      where.OR = [
+        { name: { contains: query.q, mode: 'insensitive' } },
+        { description: { contains: query.q, mode: 'insensitive' } },
+      ];
+    }
+    const rows = await this.prisma.product.findMany({
+      where,
+      orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
+      take: MAX_LIST,
+    });
+    const ratings = await this.ratings(rows.map((r) => r.id));
+    return sortProducts(
+      rows.map((r) => toProductDto(r, ratings.get(r.id) ?? NO_RATING)),
+      query.sort,
+    );
+  }
+
+  /** 판매 중인 상품의 카테고리와 상품 수(이름순). 카테고리가 비어 있는 상품은 빼고 셉니다. */
+  async categories(): Promise<CategoryDto[]> {
+    const rows = await this.prisma.product.groupBy({
+      by: ['category'],
+      where: { isActive: true, NOT: { category: '' } },
+      _count: { _all: true },
+    });
+    return rows
+      .map((r) => ({ name: r.category, count: r._count._all }))
+      .sort((a, b) => a.name.localeCompare(b.name, 'ko'));
   }
 
   async get(id: string): Promise<ProductDto> {
     if (!isUuid(id)) throw new NotFoundException('Product not found');
     const p = await this.prisma.product.findUnique({ where: { id } });
-    if (!p) throw new NotFoundException('Product not found');
-    return toProductDto(p);
+    if (!p || !p.isActive) throw new NotFoundException('Product not found');
+    const ratings = await this.ratings([p.id]);
+    return toProductDto(p, ratings.get(p.id) ?? NO_RATING);
   }
 
-  /**
-   * 상품 등록. user 가 주어지면 ADMIN 여부를 서버에서 확인합니다(USER → 403).
-   */
-  async create(body: unknown, user?: AuthUser): Promise<ProductDto> {
-    if (user && user.role !== 'ADMIN') {
-      throw new ForbiddenException('Admin only');
-    }
-    const input = validateCreateProduct(body);
+  async create(dto: CreateProductDto): Promise<ProductDto> {
     const p = await this.prisma.product.create({
       data: {
-        name: input.name,
-        description: input.description,
-        price: input.price,
+        name: dto.name,
+        description: dto.description ?? '',
+        price: dto.price,
         currency: 'KRW',
-        stock: input.stock,
-        reserved: 0,
+        stock: dto.stock,
+        category: dto.category ?? '',
+        imageUrl: dto.imageUrl ?? null,
       },
     });
     return toProductDto(p);
+  }
+
+  async update(id: string, dto: UpdateProductDto): Promise<ProductDto> {
+    if (!isUuid(id)) throw new NotFoundException('Product not found');
+
+    const data: Prisma.ProductUpdateInput = {};
+    if (dto.name !== undefined) data.name = dto.name;
+    if (dto.description !== undefined) data.description = dto.description;
+    if (dto.price !== undefined) data.price = dto.price;
+    if (dto.stock !== undefined) data.stock = dto.stock;
+    if (dto.category !== undefined) data.category = dto.category;
+    if (dto.imageUrl !== undefined) data.imageUrl = dto.imageUrl;
+    if (dto.isActive !== undefined) data.isActive = dto.isActive;
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      // 재고 변경과 동시 예약이 섞이지 않도록 행을 먼저 잠급니다.
+      const locked = await tx.$queryRaw<{ id: string }[]>`
+        SELECT id FROM products WHERE id = ${id}::uuid FOR UPDATE`;
+      if (locked.length === 0) throw new NotFoundException('Product not found');
+      if (Object.keys(data).length === 0) {
+        const current = await tx.product.findUnique({ where: { id } });
+        if (!current) throw new NotFoundException('Product not found');
+        return current;
+      }
+      return tx.product.update({ where: { id }, data });
+    });
+    const ratings = await this.ratings([updated.id]);
+    return toProductDto(updated, ratings.get(updated.id) ?? NO_RATING);
+  }
+
+  async remove(id: string): Promise<void> {
+    if (!isUuid(id)) throw new NotFoundException('Product not found');
+    const result = await this.prisma.product.updateMany({
+      where: { id },
+      data: { isActive: false },
+    });
+    if (result.count === 0) throw new NotFoundException('Product not found');
   }
 }

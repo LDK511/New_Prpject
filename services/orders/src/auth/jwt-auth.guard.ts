@@ -1,90 +1,55 @@
-import {
-  CanActivate,
-  ExecutionContext,
-  Injectable,
-  UnauthorizedException,
-  createParamDecorator,
-} from '@nestjs/common';
+import { CanActivate, ExecutionContext, Injectable, Logger, UnauthorizedException } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
 import type { Request } from 'express';
-import * as jwt from 'jsonwebtoken';
+import { AuthUser, verifyAccessToken, verifyServiceToken } from './jwt';
+import { TOKEN_TYPE_KEY } from './token-type.decorator';
 
-export interface AuthUser {
-  id: string;
-  email: string;
-  role: 'USER' | 'ADMIN';
+export interface AuthenticatedRequest extends Request {
+  user?: AuthUser;
 }
 
-/** 필수 환경 변수를 읽고, 없으면 시작을 거부합니다(기본값 없음). */
-export function requireEnv(name: string): string {
-  const value = process.env[name];
-  if (value === undefined || value.trim() === '') {
-    // eslint-disable-next-line no-console
-    console.error(`[orders] Missing required environment variable: ${name}`);
-    process.exit(1);
-  }
-  return value;
+function extractBearer(h: string | undefined): string | null {
+  if (!h) return null;
+  const m = /^Bearer\s+(\S+)$/i.exec(h.trim());
+  return m ? m[1] : null;
 }
 
-type RequestWithUser = Request & { user?: AuthUser };
-
-function headerValue(v: string | string[] | undefined): string | undefined {
-  if (Array.isArray(v)) return v[0];
-  return v;
-}
-
-/**
- * 게이트웨이가 이미 검증했더라도 같은 JWT_SECRET으로 Bearer 토큰을 다시 검증합니다.
- * x-user-id 헤더가 있는데 토큰의 sub와 다르면 401을 돌려줍니다.
- */
 @Injectable()
 export class JwtAuthGuard implements CanActivate {
-  private readonly secret: string = requireEnv('JWT_SECRET');
+  private readonly logger = new Logger(JwtAuthGuard.name);
+
+  constructor(private readonly reflector: Reflector) {}
 
   canActivate(context: ExecutionContext): boolean {
-    const req = context.switchToHttp().getRequest<RequestWithUser>();
-    const auth = headerValue(req.headers['authorization']);
-    if (!auth) throw new UnauthorizedException();
+    const req = context.switchToHttp().getRequest<AuthenticatedRequest>();
+    const kind =
+      this.reflector.getAllAndOverride<'access' | 'service' | undefined>(TOKEN_TYPE_KEY, [
+        context.getHandler(),
+        context.getClass(),
+      ]) ?? 'access';
 
-    const match = /^Bearer\s+(.+)$/i.exec(auth.trim());
-    if (!match) throw new UnauthorizedException();
-    const token = match[1].trim();
-
-    let payload: string | jwt.JwtPayload;
-    try {
-      payload = jwt.verify(token, this.secret, { algorithms: ['HS256'] });
-    } catch {
-      throw new UnauthorizedException();
-    }
-    if (typeof payload !== 'object' || payload === null) {
+    const secret = process.env.JWT_SECRET;
+    if (!secret) {
+      this.logger.error('JWT_SECRET is not configured');
       throw new UnauthorizedException();
     }
 
-    const sub = payload.sub;
-    const email = (payload as Record<string, unknown>).email;
-    const role = (payload as Record<string, unknown>).role;
-    if (
-      typeof sub !== 'string' ||
-      sub.length === 0 ||
-      typeof email !== 'string' ||
-      (role !== 'USER' && role !== 'ADMIN')
-    ) {
+    const rawAuth = req.headers['authorization'];
+    const token = extractBearer(Array.isArray(rawAuth) ? rawAuth[0] : rawAuth);
+    if (!token) {
       throw new UnauthorizedException();
     }
 
-    const headerUserId = headerValue(req.headers['x-user-id']);
-    if (headerUserId !== undefined && headerUserId !== sub) {
+    // verify* 함수는 실패 시 UnauthorizedException 을 던집니다.
+    const user = kind === 'service' ? verifyServiceToken(token, secret) : verifyAccessToken(token, secret);
+
+    const headerUserId = req.headers['x-user-id'];
+    const claimed = Array.isArray(headerUserId) ? headerUserId[0] : headerUserId;
+    if (claimed !== undefined && claimed !== user.userId) {
       throw new UnauthorizedException();
     }
 
-    req.user = { id: sub, email, role };
+    req.user = user;
     return true;
   }
 }
-
-export const CurrentUser = createParamDecorator(
-  (_data: unknown, ctx: ExecutionContext): AuthUser => {
-    const req = ctx.switchToHttp().getRequest<RequestWithUser>();
-    if (!req.user) throw new UnauthorizedException();
-    return req.user;
-  },
-);

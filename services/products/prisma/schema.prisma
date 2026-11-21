@@ -1,6 +1,9 @@
+// products 서비스 전용 스키마 — PRODUCTS_DB_URL 하나만 사용합니다.
+// 상태 값은 enum 대신 text + DB CHECK 제약(migration.sql)으로 표현합니다.
+
 generator client {
   provider      = "prisma-client-js"
-  binaryTargets = ["native", "linux-musl-openssl-3.0.x", "debian-openssl-3.0.x"]
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
 }
 
 datasource db {
@@ -8,30 +11,68 @@ datasource db {
   url      = env("PRODUCTS_DB_URL")
 }
 
-// CHECK 제약(price>=0, stock>=0, reserved>=0, reserved<=stock)은 마이그레이션 SQL과 서비스 코드에서 검사합니다.
 model Product {
-  id          String   @id @default(uuid()) @db.Uuid
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   name        String
   description String   @default("")
   price       Int
   currency    String   @default("KRW")
-  stock       Int      @default(0)
-  reserved    Int      @default(0)
-  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  stock       Int
+  imageUrl    String?  @map("image_url")
+  category    String   @default("")
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  @@index([createdAt])
+  reviews     Review[]
+  wishlists   Wishlist[]
+
+  @@index([category])
   @@map("products")
 }
 
-// id = reservationId = orderId. status: 'RESERVED' | 'CONFIRMED' | 'RELEASED'
-model StockReservation {
-  id          String   @id @db.Uuid
-  status      String
-  items       Json
-  totalAmount Int      @map("total_amount")
-  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+/// 상품 리뷰 — 회원 한 명이 상품마다 하나만 씁니다(rating 은 DB CHECK 로 1~5).
+model Review {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId  String   @map("product_id") @db.Uuid
+  userId     String   @map("user_id") @db.Uuid
+  authorName String   @map("author_name")
+  rating     Int
+  content    String
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  product    Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
 
+  @@unique([productId, userId])
+  @@index([productId, createdAt])
+  @@map("reviews")
+}
+
+/// 찜 — 회원·상품 쌍마다 한 줄.
+model Wishlist {
+  userId    String   @map("user_id") @db.Uuid
+  productId String   @map("product_id") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@id([userId, productId])
+  @@map("wishlists")
+}
+
+model StockReservation {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderId     String    @unique @map("order_id") @db.Uuid
+  // 'RESERVED' | 'CONFIRMED' | 'RELEASED'
+  status      String
+  // [{ productId, name, unitPrice, quantity, lineTotal }]
+  items       Json      @db.JsonB
+  totalAmount Int       @map("total_amount")
+  currency    String    @default("KRW")
+  expiresAt   DateTime  @map("expires_at") @db.Timestamptz(6)
+  confirmedAt DateTime? @map("confirmed_at") @db.Timestamptz(6)
+  releasedAt  DateTime? @map("released_at") @db.Timestamptz(6)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([status, expiresAt])
   @@map("stock_reservations")
 }

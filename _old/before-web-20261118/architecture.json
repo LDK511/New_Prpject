@@ -1,0 +1,380 @@
+{
+  "services": [
+    {
+      "name": "gateway",
+      "path": "services/gateway",
+      "kind": "api",
+      "language": "node",
+      "port": 3000,
+      "health": "/health",
+      "start": [],
+      "output": "",
+      "public": true,
+      "purpose": "NestJS API 게이트웨이: 외부 REST 요청 수신, JWT 검증, 외부에서 들어온 x-user-id/x-user-role 헤더 제거 후 토큰 값으로 덮어써 내부 서비스로 REST 프록시, 로그인 시도 횟수 제한",
+      "depends_on": [
+        "users",
+        "products",
+        "orders"
+      ],
+      "databases": []
+    },
+    {
+      "name": "users",
+      "path": "services/users",
+      "kind": "api",
+      "language": "node",
+      "port": 3001,
+      "health": "/health",
+      "start": [],
+      "output": "",
+      "public": false,
+      "purpose": "회원 서비스: 회원가입(이메일 형식·비밀번호 길이 검증, 중복 409), bcrypt 해시 저장, 로그인 시 JWT 발급, 본인 정보 조회, USER/ADMIN 역할",
+      "depends_on": [],
+      "databases": [
+        "users-db"
+      ]
+    },
+    {
+      "name": "products",
+      "path": "services/products",
+      "kind": "api",
+      "language": "node",
+      "port": 3002,
+      "health": "/health",
+      "start": [],
+      "output": "",
+      "public": false,
+      "purpose": "상품 서비스: 상품 목록·상세 조회, ADMIN 상품 등록·수정·삭제, 행 잠금 트랜잭션 기반 재고 예약·확정·해제(정확히 한 번 복원)",
+      "depends_on": [],
+      "databases": [
+        "products-db"
+      ]
+    },
+    {
+      "name": "orders",
+      "path": "services/orders",
+      "kind": "api",
+      "language": "node",
+      "port": 3003,
+      "health": "/health",
+      "start": [],
+      "output": "",
+      "public": false,
+      "purpose": "주문 서비스: 주문 생성(idempotency key, 상품 서비스 동기 재고 예약), 모의 결제 호출 후 PAID_TEST/FAILED 처리와 예약 해제 보상, 미결제 주문 만료 스케줄러, BullMQ 알림 작업 등록, 본인/관리자 주문 조회",
+      "depends_on": [
+        "products",
+        "mock-payment"
+      ],
+      "databases": [
+        "orders-db",
+        "redis"
+      ]
+    },
+    {
+      "name": "notification-worker",
+      "path": "services/notification-worker",
+      "kind": "worker",
+      "language": "node",
+      "port": 0,
+      "health": "",
+      "start": [],
+      "output": "",
+      "public": false,
+      "purpose": "BullMQ 주문 알림 워커: 주문 ID 포함 알림 처리 로그 기록, 지수 백오프 재시도, 최종 실패 작업은 failed 상태로 보관(NOTIFY_FORCE_FAIL로 강제 실패 테스트)",
+      "depends_on": [],
+      "databases": [
+        "redis"
+      ]
+    },
+    {
+      "name": "mock-payment",
+      "path": "services/mock-payment",
+      "kind": "api",
+      "language": "node",
+      "port": 3004,
+      "health": "/health",
+      "start": [],
+      "output": "",
+      "public": false,
+      "purpose": "테스트 전용 모의 결제 서버: 결제 요청에 대해 성공/실패(MOCK_PAYMENT_FAIL 설정) 응답, NODE_ENV=production 에서는 시작 거절",
+      "depends_on": [],
+      "databases": []
+    }
+  ],
+  "databases": [
+    {
+      "name": "users-db",
+      "engine": "postgres",
+      "tables": [
+        "users"
+      ],
+      "purpose": "회원 서비스 전용 DB (Prisma)"
+    },
+    {
+      "name": "products-db",
+      "engine": "postgres",
+      "tables": [
+        "products",
+        "stock_reservations"
+      ],
+      "purpose": "상품 서비스 전용 DB (Prisma)"
+    },
+    {
+      "name": "orders-db",
+      "engine": "postgres",
+      "tables": [
+        "orders",
+        "order_items"
+      ],
+      "purpose": "주문 서비스 전용 DB (Prisma)"
+    },
+    {
+      "name": "redis",
+      "engine": "redis",
+      "tables": [],
+      "purpose": "BullMQ 주문 알림 큐 및 실패 작업 보관"
+    }
+  ],
+  "endpoints": [
+    {
+      "service": "gateway",
+      "method": "POST",
+      "path": "/api/auth/signup",
+      "auth": false,
+      "expect": 201,
+      "body": null
+    },
+    {
+      "service": "gateway",
+      "method": "POST",
+      "path": "/api/auth/login",
+      "auth": false,
+      "expect": 200,
+      "body": null
+    },
+    {
+      "service": "gateway",
+      "method": "GET",
+      "path": "/api/users/me",
+      "auth": true,
+      "expect": 200,
+      "body": null
+    },
+    {
+      "service": "gateway",
+      "method": "GET",
+      "path": "/api/products",
+      "auth": false,
+      "expect": 200,
+      "body": null
+    },
+    {
+      "service": "gateway",
+      "method": "GET",
+      "path": "/api/products/:id",
+      "auth": false,
+      "expect": 200,
+      "body": null
+    },
+    {
+      "service": "gateway",
+      "method": "POST",
+      "path": "/api/products",
+      "auth": true,
+      "expect": 201,
+      "body": null
+    },
+    {
+      "service": "gateway",
+      "method": "PATCH",
+      "path": "/api/products/:id",
+      "auth": true,
+      "expect": 200,
+      "body": null
+    },
+    {
+      "service": "gateway",
+      "method": "DELETE",
+      "path": "/api/products/:id",
+      "auth": true,
+      "expect": 200,
+      "body": null
+    },
+    {
+      "service": "gateway",
+      "method": "POST",
+      "path": "/api/orders",
+      "auth": true,
+      "expect": 201,
+      "body": null
+    },
+    {
+      "service": "gateway",
+      "method": "GET",
+      "path": "/api/orders",
+      "auth": true,
+      "expect": 200,
+      "body": null
+    },
+    {
+      "service": "gateway",
+      "method": "GET",
+      "path": "/api/orders/:id",
+      "auth": true,
+      "expect": 200,
+      "body": null
+    },
+    {
+      "service": "gateway",
+      "method": "POST",
+      "path": "/api/orders/:id/cancel",
+      "auth": true,
+      "expect": 200,
+      "body": null
+    },
+    {
+      "service": "gateway",
+      "method": "GET",
+      "path": "/api/admin/orders",
+      "auth": true,
+      "expect": 200,
+      "body": null
+    },
+    {
+      "service": "users",
+      "method": "POST",
+      "path": "/auth/signup",
+      "auth": false,
+      "expect": 201,
+      "body": null
+    },
+    {
+      "service": "users",
+      "method": "POST",
+      "path": "/auth/login",
+      "auth": false,
+      "expect": 200,
+      "body": null
+    },
+    {
+      "service": "users",
+      "method": "GET",
+      "path": "/users/me",
+      "auth": true,
+      "expect": 200,
+      "body": null
+    },
+    {
+      "service": "products",
+      "method": "GET",
+      "path": "/products",
+      "auth": false,
+      "expect": 200,
+      "body": null
+    },
+    {
+      "service": "products",
+      "method": "GET",
+      "path": "/products/:id",
+      "auth": false,
+      "expect": 200,
+      "body": null
+    },
+    {
+      "service": "products",
+      "method": "POST",
+      "path": "/products",
+      "auth": true,
+      "expect": 201,
+      "body": null
+    },
+    {
+      "service": "products",
+      "method": "PATCH",
+      "path": "/products/:id",
+      "auth": true,
+      "expect": 200,
+      "body": null
+    },
+    {
+      "service": "products",
+      "method": "DELETE",
+      "path": "/products/:id",
+      "auth": true,
+      "expect": 200,
+      "body": null
+    },
+    {
+      "service": "products",
+      "method": "POST",
+      "path": "/internal/reservations",
+      "auth": true,
+      "expect": 201,
+      "body": null
+    },
+    {
+      "service": "products",
+      "method": "POST",
+      "path": "/internal/reservations/:id/confirm",
+      "auth": true,
+      "expect": 200,
+      "body": null
+    },
+    {
+      "service": "products",
+      "method": "POST",
+      "path": "/internal/reservations/:id/release",
+      "auth": true,
+      "expect": 200,
+      "body": null
+    },
+    {
+      "service": "orders",
+      "method": "POST",
+      "path": "/orders",
+      "auth": true,
+      "expect": 201,
+      "body": null
+    },
+    {
+      "service": "orders",
+      "method": "GET",
+      "path": "/orders",
+      "auth": true,
+      "expect": 200,
+      "body": null
+    },
+    {
+      "service": "orders",
+      "method": "GET",
+      "path": "/orders/:id",
+      "auth": true,
+      "expect": 200,
+      "body": null
+    },
+    {
+      "service": "orders",
+      "method": "POST",
+      "path": "/orders/:id/cancel",
+      "auth": true,
+      "expect": 200,
+      "body": null
+    },
+    {
+      "service": "orders",
+      "method": "GET",
+      "path": "/admin/orders",
+      "auth": true,
+      "expect": 200,
+      "body": null
+    },
+    {
+      "service": "mock-payment",
+      "method": "POST",
+      "path": "/payments",
+      "auth": true,
+      "expect": 201,
+      "body": null
+    }
+  ]
+}

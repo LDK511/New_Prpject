@@ -1,21 +1,25 @@
 import 'reflect-metadata';
-import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
 import { loadConfig } from './config';
 
 async function bootstrap(): Promise<void> {
-  // 모듈을 만들기 전에 환경을 확인합니다(production·비 mock 모드·비밀값 누락이면 종료).
-  const config = loadConfig();
-  const app = await NestFactory.create(AppModule, { logger: ['log', 'warn', 'error'] });
+  // PORT, JWT_SECRET 만으로 시작합니다. PAYMENT_MODE 가 mock 이외 값이면 시작을 거절합니다.
+  const config = loadConfig(process.env);
+
+  const app = await NestFactory.create<NestExpressApplication>(AppModule.forRoot(config));
+  app.disable('x-powered-by');
+  app.useBodyParser('json', { limit: '32kb' });
   app.enableShutdownHooks();
-  // NODE_ENV=test 여도 반드시 포트를 엽니다.
+
   await app.listen(config.port, '0.0.0.0');
-  new Logger('Bootstrap').log(`mock-payment listening on :${config.port} (PAYMENT_MODE=mock, test only)`);
+  console.log(
+    `mock-payment listening on 0.0.0.0:${config.port} (test mode, forceFail=${config.forceFail}, delayMs=${config.delayMs})`,
+  );
 }
 
 bootstrap().catch((err: unknown) => {
-  // eslint-disable-next-line no-console
-  console.error('[mock-payment] failed to start', err);
+  console.error('mock-payment failed to start:', err instanceof Error ? err.message : err);
   process.exit(1);
 });

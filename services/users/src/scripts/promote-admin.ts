@@ -1,34 +1,31 @@
-// 사용법(users 컨테이너 안에서): npm run promote-admin -- <email>
-// 관리자 기본 계정은 만들지 않으며, 이미 가입된 회원만 ADMIN으로 승격합니다.
 import { PrismaClient } from '@prisma/client';
+import { requireEnv } from '../config';
 
+// 사용법: npm run promote-admin -- user@example.com
+// 이미 가입된 사용자의 role 만 ADMIN 으로 바꿉니다. 계정이나 비밀번호를 새로 만들지 않습니다.
 async function main(): Promise<number> {
-  const dbUrl = process.env.USERS_DB_URL;
-  if (!dbUrl || dbUrl.trim() === '') {
-    console.error('USERS_DB_URL is required');
-    return 1;
-  }
+  requireEnv('USERS_DB_URL');
 
-  const rawEmail = process.argv[2];
-  if (!rawEmail || rawEmail.trim() === '') {
+  const raw = process.argv[2];
+  const email = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+  if (!email) {
     console.error('Usage: npm run promote-admin -- <email>');
     return 1;
   }
-  const email = rawEmail.trim().toLowerCase();
 
   const prisma = new PrismaClient();
   try {
-    const existing = await prisma.user.findUnique({ where: { email } });
-    if (!existing) {
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user) {
       console.error(`User not found: ${email}`);
       return 1;
     }
-    if (existing.role === 'ADMIN') {
+    if (user.role === 'ADMIN') {
       console.log(`User ${email} is already ADMIN`);
       return 0;
     }
-    await prisma.user.update({ where: { email }, data: { role: 'ADMIN' } });
-    console.log(`User ${email} promoted to ADMIN. 새 역할을 반영하려면 다시 로그인하세요.`);
+    await prisma.user.update({ where: { id: user.id }, data: { role: 'ADMIN' } });
+    console.log(`User ${email} promoted to ADMIN`);
     return 0;
   } finally {
     await prisma.$disconnect();
@@ -36,8 +33,11 @@ async function main(): Promise<number> {
 }
 
 main()
-  .then((code) => process.exit(code))
+  .then((code) => {
+    process.exit(code);
+  })
   .catch((err: unknown) => {
-    console.error('promote-admin failed:', err instanceof Error ? err.message : String(err));
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`promote-admin failed: ${message}`);
     process.exit(1);
   });

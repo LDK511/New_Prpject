@@ -1,125 +1,88 @@
-import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
-import { requireEnv } from '../auth/jwt-auth.guard';
+import { Injectable, Logger } from '@nestjs/common';
+import { intEnv, requireEnv } from '../config';
+import { signServiceToken } from '../auth/service-token';
+import { UpstreamHttpError } from './upstream-error';
+import { ReservationDto } from './types';
 
-export interface ReservationItem {
-  productId: string;
-  name: string;
-  unitPrice: number;
-  quantity: number;
+function trimSlash(url: string): string {
+  return url.replace(/\/+$/, '');
 }
 
-export interface ReservationResult {
-  reservationId: string;
-  status: 'RESERVED' | 'CONFIRMED' | 'RELEASED';
-  items: ReservationItem[];
-  totalAmount: number;
-  currency: string;
+async function readErrorMessage(res: Response): Promise<string> {
+  try {
+    const text = await res.text();
+    if (!text) return res.statusText || `HTTP ${res.status}`;
+    try {
+      const parsed = JSON.parse(text) as { message?: unknown };
+      if (typeof parsed.message === 'string') return parsed.message;
+      if (Array.isArray(parsed.message)) return parsed.message.map(String).join(', ');
+    } catch {
+      // JSON 이 아니면 아래에서 일반 메시지를 씁니다.
+    }
+    return res.statusText || `HTTP ${res.status}`;
+  } catch {
+    return res.statusText || `HTTP ${res.status}`;
+  }
 }
-
-const PASSTHROUGH_STATUSES = new Set([400, 404, 409]);
-const TIMEOUT_MS = 10_000;
 
 @Injectable()
 export class ProductsClient {
   private readonly logger = new Logger(ProductsClient.name);
   private readonly baseUrl: string;
+  private readonly secret: string;
+  private readonly timeoutMs: number;
 
   constructor() {
-    this.baseUrl = requireEnv('PRODUCTS_URL').replace(/\/+$/, '');
+    this.baseUrl = trimSlash(requireEnv('PRODUCTS_URL'));
+    this.secret = requireEnv('JWT_SECRET');
+    this.timeoutMs = intEnv('HTTP_TIMEOUT_MS', 5000);
   }
 
-  async reserve(
-    reservationId: string,
+  reserve(
+    orderId: string,
     items: { productId: string; quantity: number }[],
-  ): Promise<ReservationResult> {
-    const body = await this.post('/internal/reservations', {
-      reservationId,
+  ): Promise<ReservationDto> {
+    return this.post('/internal/reservations', {
+      orderId,
       items: items.map((i) => ({ productId: i.productId, quantity: i.quantity })),
     });
-    return this.toReservation(body);
   }
 
-  async confirm(id: string): Promise<void> {
-    await this.post(`/internal/reservations/${encodeURIComponent(id)}/confirm`, {});
+  confirm(reservationId: string): Promise<ReservationDto> {
+    return this.post(`/internal/reservations/${encodeURIComponent(reservationId)}/confirm`, {});
   }
 
-  async release(id: string): Promise<void> {
-    await this.post(`/internal/reservations/${encodeURIComponent(id)}/release`, {});
+  release(reservationId: string): Promise<ReservationDto> {
+    return this.post(`/internal/reservations/${encodeURIComponent(reservationId)}/release`, {});
   }
 
-  private toReservation(body: unknown): ReservationResult {
-    const b = body as Partial<ReservationResult> | null;
-    if (
-      !b ||
-      typeof b.reservationId !== 'string' ||
-      !Array.isArray(b.items) ||
-      !Number.isInteger(b.totalAmount) ||
-      typeof b.currency !== 'string'
-    ) {
-      this.logger.error('products 서비스의 예약 응답 형식이 올바르지 않습니다');
-      throw new HttpException({ statusCode: 502, message: 'Bad Gateway' }, HttpStatus.BAD_GATEWAY);
-    }
-    const items: ReservationItem[] = b.items.map((it) => {
-      const x = it as Partial<ReservationItem>;
-      if (
-        typeof x.productId !== 'string' ||
-        typeof x.name !== 'string' ||
-        !Number.isInteger(x.unitPrice) ||
-        !Number.isInteger(x.quantity)
-      ) {
-        throw new HttpException({ statusCode: 502, message: 'Bad Gateway' }, HttpStatus.BAD_GATEWAY);
-      }
-      return {
-        productId: x.productId,
-        name: x.name,
-        unitPrice: x.unitPrice as number,
-        quantity: x.quantity as number,
-      };
-    });
-    return {
-      reservationId: b.reservationId,
-      status: (b.status ?? 'RESERVED') as ReservationResult['status'],
-      items,
-      totalAmount: b.totalAmount as number,
-      currency: b.currency,
-    };
-  }
-
-  private async post(path: string, payload: unknown): Promise<unknown> {
+  private async post(path: string, body: unknown): Promise<ReservationDto> {
     let res: Response;
     try {
       res = await fetch(`${this.baseUrl}${path}`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', accept: 'application/json' },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(TIMEOUT_MS),
+        headers: {
+          Authorization: `Bearer ${signServiceToken(this.secret)}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(this.timeoutMs),
       });
     } catch (err) {
-      this.logger.error(`products 호출 실패 POST ${path}: ${(err as Error).message}`);
-      throw new HttpException({ statusCode: 502, message: 'Bad Gateway' }, HttpStatus.BAD_GATEWAY);
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`products request failed: POST ${path}: ${msg}`);
+      throw new UpstreamHttpError(0, 'Products service unavailable');
     }
 
-    let body: unknown = null;
-    const text = await res.text().catch(() => '');
-    if (text) {
-      try {
-        body = JSON.parse(text);
-      } catch {
-        body = null;
-      }
+    if (res.status < 200 || res.status >= 300) {
+      const message = await readErrorMessage(res);
+      throw new UpstreamHttpError(res.status, message);
     }
 
-    if (res.ok) return body;
-
-    if (PASSTHROUGH_STATUSES.has(res.status)) {
-      const msg =
-        body && typeof body === 'object' && 'message' in body
-          ? (body as { message: unknown }).message
-          : res.statusText;
-      throw new HttpException({ statusCode: res.status, message: msg }, res.status);
+    try {
+      return (await res.json()) as ReservationDto;
+    } catch {
+      throw new UpstreamHttpError(0, 'Invalid products response');
     }
-
-    this.logger.error(`products 응답 오류 POST ${path}: ${res.status}`);
-    throw new HttpException({ statusCode: 502, message: 'Bad Gateway' }, HttpStatus.BAD_GATEWAY);
   }
 }

@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 600" role="img">
+<defs>
+<linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fae8ff"/><stop offset="1" stop-color="#f0abfc"/></linearGradient>
+<linearGradient id="dark" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3b4252"/><stop offset="1" stop-color="#1f2430"/></linearGradient>
+<linearGradient id="metal" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f4f5f7"/><stop offset="1" stop-color="#b9bfca"/></linearGradient>
+<linearGradient id="acc" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#c026d3"/><stop offset="1" stop-color="#c026d3" stop-opacity=".7"/></linearGradient>
+</defs>
+<rect width="800" height="600" fill="url(#bg)"/>
+<circle cx="640" cy="120" r="180" fill="#fff" opacity=".18"/>
+<circle cx="120" cy="520" r="140" fill="#fff" opacity=".12"/>
+<ellipse cx="400" cy="505" rx="250" ry="22" fill="#000" opacity=".12"/>
+<rect x="340" y="110" width="120" height="230" rx="60" fill="url(#dark)"/>
+<g stroke="#59627a" stroke-width="5"><path d="M352 170h96M352 200h96M352 230h96M352 260h96"/></g><rect x="340" y="282" width="120" height="16" fill="url(#acc)"/>
+<path d="M300 280c0 70 44 110 100 110s100-40 100-110" fill="none" stroke="url(#metal)" stroke-width="14" stroke-linecap="round"/>
+<rect x="390" y="388" width="20" height="76" fill="url(#metal)"/><rect x="310" y="462" width="180" height="26" rx="13" fill="#3b4252"/>
+</svg>

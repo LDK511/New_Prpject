@@ -1,93 +1,65 @@
-import {
-  CanActivate,
-  ExecutionContext,
-  Injectable,
-  UnauthorizedException,
-  createParamDecorator,
-} from '@nestjs/common';
+import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
 import type { Request } from 'express';
-import * as jwt from 'jsonwebtoken';
+import { AuthUser, verifyAccessToken, verifyServiceToken } from './jwt';
+import { TOKEN_TYPE_KEY, TokenKind } from './token-type.decorator';
 
-export interface AuthUser {
-  id: string;
-  email: string;
-  role: 'USER' | 'ADMIN';
+export interface AuthenticatedRequest extends Request {
+  user?: AuthUser;
+}
+
+function extractBearer(h: string | undefined): string | null {
+  if (!h || typeof h !== 'string') return null;
+  const m = /^Bearer\s+(\S+)$/i.exec(h.trim());
+  return m ? m[1] : null;
+}
+
+function firstHeader(v: string | string[] | undefined): string | undefined {
+  if (Array.isArray(v)) return v[0];
+  return v;
 }
 
 /**
- * 필수 환경 변수를 읽습니다. 없으면 기본값 없이 시작을 거부합니다.
+ * Authorization: Bearer 토큰을 검증하고 req.user 에 신원을 넣습니다.
+ * - 토큰 종류는 @TokenType 메타데이터(기본 'access')로 결정합니다.
+ * - x-user-id 헤더가 있는데 토큰의 sub 와 다르면 401 입니다.
+ * - 신원은 언제나 토큰에서만 꺼냅니다.
  */
-export function requireEnv(name: string): string {
-  const value = process.env[name];
-  if (value === undefined || value.trim() === '') {
-    // eslint-disable-next-line no-console
-    console.error(`[products] 필수 환경 변수 ${name} 가 설정되지 않아 시작을 거부합니다.`);
-    process.exit(1);
-  }
-  return value;
-}
-
-type RequestWithUser = Request & { user?: AuthUser };
-
-function headerValue(req: Request, name: string): string | undefined {
-  const raw = req.headers[name];
-  if (Array.isArray(raw)) return raw[0];
-  return raw;
-}
-
 @Injectable()
 export class JwtAuthGuard implements CanActivate {
-  private readonly secret: string;
-
-  constructor() {
-    this.secret = requireEnv('JWT_SECRET');
-  }
+  constructor(private readonly reflector: Reflector) {}
 
   canActivate(context: ExecutionContext): boolean {
-    const req = context.switchToHttp().getRequest<RequestWithUser>();
-    const auth = headerValue(req, 'authorization');
-    if (!auth || !auth.startsWith('Bearer ')) {
-      throw new UnauthorizedException('Unauthorized');
-    }
-    const token = auth.slice('Bearer '.length).trim();
-    if (!token) throw new UnauthorizedException('Unauthorized');
+    const req = context.switchToHttp().getRequest<AuthenticatedRequest>();
+    const kind: TokenKind =
+      this.reflector.getAllAndOverride<TokenKind | undefined>(TOKEN_TYPE_KEY, [
+        context.getHandler(),
+        context.getClass(),
+      ]) ?? 'access';
 
-    let payload: string | jwt.JwtPayload;
+    const secret = process.env.JWT_SECRET;
+    if (!secret) {
+      throw new UnauthorizedException();
+    }
+
+    const token = extractBearer(firstHeader(req.headers['authorization']));
+    if (!token) {
+      throw new UnauthorizedException();
+    }
+
+    let user: AuthUser;
     try {
-      payload = jwt.verify(token, this.secret, { algorithms: ['HS256'] });
+      user = kind === 'service' ? verifyServiceToken(token, secret) : verifyAccessToken(token, secret);
     } catch {
-      throw new UnauthorizedException('Unauthorized');
-    }
-    if (typeof payload !== 'object' || payload === null) {
-      throw new UnauthorizedException('Unauthorized');
-    }
-    const sub = payload.sub;
-    const email = (payload as Record<string, unknown>).email;
-    const role = (payload as Record<string, unknown>).role;
-    if (
-      typeof sub !== 'string' ||
-      sub.length === 0 ||
-      typeof email !== 'string' ||
-      (role !== 'USER' && role !== 'ADMIN')
-    ) {
-      throw new UnauthorizedException('Unauthorized');
+      throw new UnauthorizedException();
     }
 
-    // 게이트웨이가 채운 x-user-id 가 토큰과 다르면 거부합니다.
-    const headerUserId = headerValue(req, 'x-user-id');
-    if (headerUserId !== undefined && headerUserId !== sub) {
-      throw new UnauthorizedException('Unauthorized');
+    const headerUserId = firstHeader(req.headers['x-user-id']);
+    if (headerUserId !== undefined && headerUserId !== user.userId) {
+      throw new UnauthorizedException();
     }
 
-    req.user = { id: sub, email, role };
+    req.user = user;
     return true;
   }
 }
-
-export const CurrentUser = createParamDecorator(
-  (_data: unknown, ctx: ExecutionContext): AuthUser => {
-    const req = ctx.switchToHttp().getRequest<RequestWithUser>();
-    if (!req.user) throw new UnauthorizedException('Unauthorized');
-    return req.user;
-  },
-);

@@ -1,25 +1,24 @@
-import { Controller, Get, HttpException, HttpStatus } from '@nestjs/common';
+import { Controller, Get, HttpStatus, Res } from '@nestjs/common';
+import type { Response } from 'express';
 import { PrismaService } from './prisma.service';
 
-/**
- * GET /health — products-db 연결이 정상이면 200 {"status":"ok"},
- * 아니면 503 {"status":"error"}를 돌려줍니다.
- */
-@Controller()
+@Controller('health')
 export class HealthController {
   constructor(private readonly prisma: PrismaService) {}
 
-  @Get('health')
-  async health(): Promise<{ status: string }> {
-    let ok = false;
+  @Get()
+  async check(@Res({ passthrough: true }) res: Response): Promise<{ status: 'ok' | 'error' }> {
+    let healthy = false;
     try {
-      ok = await this.prisma.isHealthy();
+      healthy = await this.prisma.isHealthy();
     } catch {
-      ok = false;
+      healthy = false;
     }
-    if (!ok) {
-      throw new HttpException({ status: 'error' }, HttpStatus.SERVICE_UNAVAILABLE);
+    if (!healthy) {
+      res.status(HttpStatus.SERVICE_UNAVAILABLE);
+      return { status: 'error' };
     }
+    res.status(HttpStatus.OK);
     return { status: 'ok' };
   }
 }

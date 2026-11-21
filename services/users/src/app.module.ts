@@ -1,13 +1,10 @@
 import { Module } from '@nestjs/common';
-import { PrismaService } from './prisma.service';
-import { AuthService } from './auth/auth.service';
-import { AuthController } from './auth/auth.controller';
-import { UsersController } from './users/users.controller';
+import { PrismaModule } from './prisma.module';
+import { UsersModule } from './users/users.module';
 import { HealthController } from './health.controller';
-import { JwtAuthGuard } from './auth/jwt-auth.guard';
 
 @Module({
-  controllers: [HealthController, AuthController, UsersController],
-  providers: [PrismaService, AuthService, JwtAuthGuard],
+  imports: [PrismaModule, UsersModule],
+  controllers: [HealthController],
 })
 export class AppModule {}

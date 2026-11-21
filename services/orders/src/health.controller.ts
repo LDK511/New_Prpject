@@ -1,48 +1,64 @@
-import { Controller, Get, Res } from '@nestjs/common';
-import { Response } from 'express';
+import { Controller, Get, Logger, OnModuleDestroy, Res } from '@nestjs/common';
+import type { Response } from 'express';
+import type IORedis from 'ioredis';
 import { PrismaService } from './prisma.service';
-import { EventPublisher } from './events/event-publisher';
+import { createRedis } from './redis';
+import { requireEnv } from './config';
 
-const CHECK_TIMEOUT_MS = 3000;
+const REDIS_PING_TIMEOUT_MS = 2000;
 
-function withTimeout(p: Promise<boolean>, ms: number): Promise<boolean> {
-  return new Promise<boolean>((resolve) => {
-    const t = setTimeout(() => resolve(false), ms);
-    p.then(
-      (v) => {
-        clearTimeout(t);
-        resolve(v === true);
-      },
-      () => {
-        clearTimeout(t);
-        resolve(false);
-      },
-    );
-  });
-}
-
-/**
- * GET /health — orders DB와 Redis가 모두 응답하면 200 {"status":"ok"},
- * 하나라도 실패하면 503 {"status":"error"}.
- */
 @Controller()
-export class HealthController {
-  constructor(
-    private readonly prisma: PrismaService,
-    private readonly events: EventPublisher,
-  ) {}
+export class HealthController implements OnModuleDestroy {
+  private readonly logger = new Logger(HealthController.name);
+  private readonly redis: IORedis;
+
+  constructor(private readonly prisma: PrismaService) {
+    this.redis = createRedis(requireEnv('REDIS_URL'));
+  }
 
   @Get('health')
   async health(@Res({ passthrough: true }) res: Response): Promise<{ status: 'ok' | 'error' }> {
-    const [dbOk, redisOk] = await Promise.all([
-      withTimeout(Promise.resolve().then(() => this.prisma.isHealthy()), CHECK_TIMEOUT_MS),
-      withTimeout(Promise.resolve().then(() => this.events.ping()), CHECK_TIMEOUT_MS),
-    ]);
+    const [dbOk, redisOk] = await Promise.all([this.checkDb(), this.checkRedis()]);
     if (dbOk && redisOk) {
       res.status(200);
       return { status: 'ok' };
     }
     res.status(503);
     return { status: 'error' };
+  }
+
+  private async checkDb(): Promise<boolean> {
+    try {
+      return await this.prisma.isHealthy();
+    } catch {
+      return false;
+    }
+  }
+
+  private async checkRedis(): Promise<boolean> {
+    if (this.redis.status !== 'ready') {
+      return false;
+    }
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const timeout = new Promise<string>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('Redis ping timeout')), REDIS_PING_TIMEOUT_MS);
+      });
+      const reply = await Promise.race([this.redis.ping(), timeout]);
+      return reply === 'PONG';
+    } catch (err) {
+      this.logger.warn(`Redis health check failed: ${(err as Error).message}`);
+      return false;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    try {
+      await this.redis.quit();
+    } catch {
+      this.redis.disconnect();
+    }
   }
 }

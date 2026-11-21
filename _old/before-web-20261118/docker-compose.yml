@@ -1,0 +1,212 @@
+# ReCoder 검증 compose — architecture.json 계약에서 만들었습니다. 서비스·DB 를 바꾸려면 계약을 고친 뒤 다시 만드세요.
+# 비밀번호는 .env 에 넣습니다(.env.example 참고). .env 는 저장소에 올리지 마세요.
+name: app
+services:
+  users-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    volumes:
+    - users-db-data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: users_db
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: ${USERS_DB_PASSWORD:?set USERS_DB_PASSWORD in .env}
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - pg_isready -U app -d users_db
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+  products-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    volumes:
+    - products-db-data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: products_db
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: ${PRODUCTS_DB_PASSWORD:?set PRODUCTS_DB_PASSWORD in .env}
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - pg_isready -U app -d products_db
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+  orders-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    volumes:
+    - orders-db-data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: orders_db
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: ${ORDERS_DB_PASSWORD:?set ORDERS_DB_PASSWORD in .env}
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - pg_isready -U app -d orders_db
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+    - redis-data:/data
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
+    command:
+    - sh
+    - -c
+    - exec redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD"
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - REDISCLI_AUTH=$$REDIS_PASSWORD redis-cli ping | grep -q PONG
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+  gateway:
+    build:
+      context: ./services/gateway
+    restart: unless-stopped
+    environment:
+      PORT: '3000'
+      NODE_ENV: production
+      USERS_URL: http://users:3001
+      PRODUCTS_URL: http://products:3002
+      ORDERS_URL: http://orders:3003
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+    depends_on:
+      users:
+        condition: service_healthy
+      products:
+        condition: service_healthy
+      orders:
+        condition: service_healthy
+    healthcheck:
+      test:
+      - CMD
+      - node
+      - -e
+      - fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    ports:
+    - ${RECODER_LOCAL_BIND:-127.0.0.1}:3000:3000
+  users:
+    build:
+      context: ./services/users
+    restart: unless-stopped
+    environment:
+      PORT: '3001'
+      NODE_ENV: production
+      USERS_DB_URL: postgres://app:${USERS_DB_PASSWORD}@users-db:5432/users_db
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+    depends_on:
+      users-db:
+        condition: service_healthy
+    healthcheck:
+      test:
+      - CMD
+      - node
+      - -e
+      - fetch('http://127.0.0.1:3001/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+  products:
+    build:
+      context: ./services/products
+    restart: unless-stopped
+    environment:
+      PORT: '3002'
+      NODE_ENV: production
+      PRODUCTS_DB_URL: postgres://app:${PRODUCTS_DB_PASSWORD}@products-db:5432/products_db
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+    depends_on:
+      products-db:
+        condition: service_healthy
+    healthcheck:
+      test:
+      - CMD
+      - node
+      - -e
+      - fetch('http://127.0.0.1:3002/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+  orders:
+    build:
+      context: ./services/orders
+    restart: unless-stopped
+    environment:
+      PORT: '3003'
+      NODE_ENV: production
+      ORDERS_DB_URL: postgres://app:${ORDERS_DB_PASSWORD}@orders-db:5432/orders_db
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      PRODUCTS_URL: http://products:3002
+      MOCK_PAYMENT_URL: http://mock-payment:3004
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+    depends_on:
+      orders-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      products:
+        condition: service_healthy
+      mock-payment:
+        condition: service_healthy
+    healthcheck:
+      test:
+      - CMD
+      - node
+      - -e
+      - fetch('http://127.0.0.1:3003/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+  notification-worker:
+    build:
+      context: ./services/notification-worker
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+  mock-payment:
+    build:
+      context: ./services/mock-payment
+    restart: unless-stopped
+    environment:
+      PORT: '3004'
+      NODE_ENV: production
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+    healthcheck:
+      test:
+      - CMD
+      - node
+      - -e
+      - fetch('http://127.0.0.1:3004/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+volumes:
+  users-db-data: {}
+  products-db-data: {}
+  orders-db-data: {}
+  redis-data: {}
